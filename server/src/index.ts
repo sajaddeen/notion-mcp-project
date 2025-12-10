@@ -1,7 +1,7 @@
 // @ts-nocheck
 import express from "express";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { Client } from "@notionhq/client";
 import { z } from "zod";
 import cors from "cors";
