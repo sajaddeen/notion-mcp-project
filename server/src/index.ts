@@ -1,98 +1,146 @@
-// server/src/index.ts
+// @ts-nocheck
 import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { Client } from "@notionhq/client";
 import { z } from "zod";
 import cors from "cors";
+import axios from "axios";
 
-// --- 1. CONFIGURATION ---
-const PORT = process.env.PORT || 3000;
+// 1. CONFIGURATION
+const PORT = Number(process.env.PORT) || 3000;
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
+const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
 
 if (!NOTION_API_KEY) {
-  console.error("Error: NOTION_API_KEY is missing in environment variables.");
+  console.error("❌ Error: NOTION_API_KEY is missing.");
   process.exit(1);
 }
 
-// --- 2. SETUP NOTION & MCP ---
 const notion = new Client({ auth: NOTION_API_KEY });
 const server = new McpServer({
-  name: "notion-mcp-server",
-  version: "1.0.0",
+  name: "notion-project-manager",
+  version: "2.0.0",
 });
 
-// --- 3. DEFINE TOOLS ---
+// 2. DEFINE TOOLS
+// We use 'as any' on the schemas to prevent TypeScript infinite recursion errors
 
-// Tool 1: Search Notion
+// --- TOOL 1: SEARCH ---
 server.tool(
   "search_notion",
-  "Search for any page or database in Notion. Useful to find IDs.",
-  { query: z.string().describe("The text to search for") },
-  async ({ query }) => {
-    const response = await notion.search({ query });
+  "Search for a Database, Project, or Page ID.",
+  { query: z.string() } as any, // <--- THE FIX
+  async (args: any) => {
+    const { query } = args;
+    console.log(`🔍 Searching Notion for: ${query}`);
+    const response = await notion.search({
+      query,
+      filter: { property: "object", value: "database" },
+      page_size: 5,
+    });
+    
+    const simplified = response.results.map((item: any) => ({
+      id: item.id,
+      name: item.title?.[0]?.plain_text || "Untitled",
+      url: item.url,
+      type: item.object
+    }));
+    
     return {
-      content: [{ type: "text", text: JSON.stringify(response.results, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(simplified, null, 2) }]
     };
   }
 );
 
-// Tool 2: Read Page Content (For reading meeting notes)
+// --- TOOL 2: CREATE TASK ---
 server.tool(
-  "get_page_content",
-  "Get the content blocks of a specific page.",
-  { page_id: z.string().describe("The ID of the page to read") },
-  async ({ page_id }) => {
-    const response = await notion.blocks.children.list({ block_id: page_id });
-    return {
-      content: [{ type: "text", text: JSON.stringify(response.results, null, 2) }],
-    };
-  }
-);
-
-// Tool 3: Add Task (For your workflow)
-server.tool(
-  "add_task",
-  "Add a new item to a specific Notion database.",
+  "create_proposed_task",
+  "Create a new task in Notion.",
   {
-    database_id: z.string().describe("ID of the Task Database"),
-    title: z.string().describe("Name of the task"),
-    status: z.string().optional().describe("Status (e.g. 'To Do')"),
-  },
-  async ({ database_id, title, status }) => {
+    database_id: z.string(),
+    title: z.string(),
+    description: z.string().optional(),
+    project_id: z.string().optional(),
+    status: z.string().optional().default("To Review"),
+  } as any, // <--- THE FIX
+  async (args: any) => {
+    const { database_id, title, description, project_id, status } = args;
+    console.log(`📝 Creating Task: ${title}`);
+    
+    const properties: any = {
+      Name: { title: [{ text: { content: title } }] },
+      Status: { select: { name: status } }, 
+    };
+
+    if (project_id) {
+      properties["Project"] = { relation: [{ id: project_id }] }; 
+    }
+
     const response = await notion.pages.create({
       parent: { database_id: database_id },
-      properties: {
-        Name: { title: [{ text: { content: title } }] }, // Adjust 'Name' if your DB uses a different column name
-        Status: { select: { name: status || "To Do" } }, // Adjust 'Status' if needed
-      },
+      properties: properties,
+      children: description
+        ? [{ object: "block", type: "paragraph", paragraph: { rich_text: [{ text: { content: description } }] } }]
+        : [],
     });
+
     return {
-      content: [{ type: "text", text: `Task created successfully. URL: ${(response as any).url}` }],
+      content: [{ type: "text", text: `Created Task: ${(response as any).url}` }]
     };
   }
 );
 
-// --- 4. EXPRESS SERVER (SSE Transport) ---
+// --- TOOL 3: SLACK ---
+server.tool(
+  "send_slack_proposal",
+  "Send a message to Slack asking for approval.",
+  {
+    task_name: z.string(),
+    notion_url: z.string(),
+    reasoning: z.string(),
+  } as any, // <--- THE FIX
+  async (args: any) => {
+    const { task_name, notion_url, reasoning } = args;
+    if (!SLACK_WEBHOOK_URL) {
+      return { content: [{ type: "text", text: "Error: No Slack URL set." }] };
+    }
+
+    await axios.post(SLACK_WEBHOOK_URL, {
+      blocks: [
+        { type: "header", text: { type: "plain_text", text: "🤖 New Task Proposal" } },
+        { type: "section", text: { type: "mrkdwn", text: `*${task_name}*\n${reasoning}` } },
+        {
+          type: "actions",
+          elements: [
+            { type: "button", text: { type: "plain_text", text: "View & Approve" }, url: notion_url, action_id: "view_notion" }
+          ]
+        }
+      ]
+    });
+    
+    return {
+      content: [{ type: "text", text: "Slack notification sent." }]
+    };
+  }
+);
+
+// 3. SERVER SETUP
 const app = express();
 app.use(cors());
 
 let transport: SSEServerTransport | null = null;
 
 app.get("/sse", async (req, res) => {
-  console.log("Client connected via SSE");
+  console.log("🔌 New SSE Connection");
   transport = new SSEServerTransport("/messages", res);
   await server.connect(transport);
 });
 
 app.post("/messages", async (req, res) => {
-  if (transport) {
-    await transport.handlePostMessage(req, res);
-  } else {
-    res.status(404).send("Session not found");
-  }
+  if (transport) await transport.handlePostMessage(req, res);
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Notion MCP Server running on port ${PORT}`);
 });
