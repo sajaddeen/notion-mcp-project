@@ -1,9 +1,8 @@
-client
-MCP_SERVER_URL=http://localhost:3000/sse
-OPENAI_API_KEY=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
+# Dependencies
+/node_modules
+/client/node_modules
+/server/node_modules
 
-server
-PORT=3000
-NOTION_API_KEY=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
-NOTION_DATABASE_ID=a83cd5da55d947b9ba44e77a7887b891
-SLACK_WEBHOOK_URL=https://hooks.slack.com/services/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
+# Environment Variables
+**/.env
+.DS_Store
