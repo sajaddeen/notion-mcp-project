@@ -1,4 +1,7 @@
 // @ts-nocheck
+import dotenv from "dotenv";
+dotenv.config();
+
 import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
@@ -17,6 +20,10 @@ if (!NOTION_API_KEY) {
   process.exit(1);
 }
 
+if (!SLACK_WEBHOOK_URL) {
+  console.warn("⚠️ Warning: SLACK_WEBHOOK_URL is missing. Slack notifications will fail.");
+}
+
 const notion = new Client({ auth: NOTION_API_KEY });
 const server = new McpServer({
   name: "notion-project-manager",
@@ -24,13 +31,12 @@ const server = new McpServer({
 });
 
 // 2. DEFINE TOOLS
-// We use 'as any' on the schemas to prevent TypeScript infinite recursion errors
 
 // --- TOOL 1: SEARCH ---
 server.tool(
   "search_notion",
   "Search for a Database, Project, or Page ID.",
-  { query: z.string() } as any, // <--- THE FIX
+  { query: z.string() } as any, 
   async (args: any) => {
     const { query } = args;
     console.log(`🔍 Searching Notion for: ${query}`);
@@ -53,7 +59,7 @@ server.tool(
   }
 );
 
-// --- TOOL 2: CREATE TASK ---
+// --- TOOL 2: CREATE TASK (Island Way Config) ---
 server.tool(
   "create_proposed_task",
   "Create a new task in Notion.",
@@ -62,20 +68,16 @@ server.tool(
     title: z.string(),
     description: z.string().optional(),
     project_id: z.string().optional(),
-    status: z.string().optional().default("To Review"),
-  } as any, // <--- THE FIX
+    status: z.string().optional().default("Not Started"),
+  } as any,
   async (args: any) => {
     const { database_id, title, description, project_id, status } = args;
-    console.log(`📝 Creating Task: ${title}`);
+    console.log(`📝 Creating Task: ${title} [Status: ${status}]`);
     
     const properties: any = {
-      Name: { title: [{ text: { content: title } }] },
-      Status: { select: { name: status } }, 
+      "Job": { title: [{ text: { content: title } }] },
+      "Status": { select: { name: status } }, 
     };
-
-    if (project_id) {
-      properties["Project"] = { relation: [{ id: project_id }] }; 
-    }
 
     const response = await notion.pages.create({
       parent: { database_id: database_id },
@@ -91,7 +93,7 @@ server.tool(
   }
 );
 
-// --- TOOL 3: SLACK ---
+// --- TOOL 3: SLACK  ---
 server.tool(
   "send_slack_proposal",
   "Send a message to Slack asking for approval.",
@@ -99,28 +101,56 @@ server.tool(
     task_name: z.string(),
     notion_url: z.string(),
     reasoning: z.string(),
-  } as any, // <--- THE FIX
+  } as any,
   async (args: any) => {
     const { task_name, notion_url, reasoning } = args;
+    console.log(`💬 Sending Slack Notification for: ${task_name}`);
+
     if (!SLACK_WEBHOOK_URL) {
-      return { content: [{ type: "text", text: "Error: No Slack URL set." }] };
+      return { content: [{ type: "text", text: "Error: No Slack URL set in .env" }] };
     }
 
     await axios.post(SLACK_WEBHOOK_URL, {
       blocks: [
-        { type: "header", text: { type: "plain_text", text: "🤖 New Task Proposal" } },
-        { type: "section", text: { type: "mrkdwn", text: `*${task_name}*\n${reasoning}` } },
+        { 
+          type: "header", 
+          text: { type: "plain_text", text: "🤖 New Task Proposal" } 
+        },
+        { 
+          type: "section", 
+          text: { type: "mrkdwn", text: `*${task_name}*\n${reasoning}` } 
+        },
         {
           type: "actions",
           elements: [
-            { type: "button", text: { type: "plain_text", text: "View & Approve" }, url: notion_url, action_id: "view_notion" }
+            // Button 1: Accept (Opens Notion)
+            { 
+              type: "button", 
+              text: { type: "plain_text", text: "Accept ✅" }, 
+              style: "primary", 
+              url: notion_url,
+              action_id: "accept_task" 
+            },
+            // Button 2: Skip (Visual Only for now)
+            { 
+              type: "button", 
+              text: { type: "plain_text", text: "Skip 🚫" }, 
+              style: "danger",
+              action_id: "skip_task" 
+            },
+            // Button 3: Feedback (Visual Only for now)
+            { 
+              type: "button", 
+              text: { type: "plain_text", text: "Feedback 💬" }, 
+              action_id: "feedback_task" 
+            }
           ]
         }
       ]
     });
     
     return {
-      content: [{ type: "text", text: "Slack notification sent." }]
+      content: [{ type: "text", text: "Slack notification sent with 3 buttons." }]
     };
   }
 );
